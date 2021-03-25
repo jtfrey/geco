@@ -1,0 +1,261 @@
+#!/bin/bash
+#
+# boot_mic.sh
+#
+# To be called from the GE prolog script on a node where one or more
+# Intel Phi coprocessors need to be booted for the job.
+#
+# On any error, the script exits with a non-zero value.
+#
+# Usage:
+#
+#     boot_mic.sh [uid] [mic#1] {[mic#2] ..}
+#
+
+mic_status ()
+{
+  local status_msg
+
+  status_msg="$(/usr/sbin/micctrl --status $1)"
+  if [ $? -eq 0 ]; then
+    status_msg="$(echo $status_msg | sed -e 's/^'$1': //' -e 's/ *(.*$//')"
+    echo $status_msg
+    return 0
+  fi
+  return 1
+}
+
+#
+##
+#
+
+mic_cleanup ()
+{
+  local mic
+  local status_msg
+
+  echo "[PROLOG]     cleanup after failed MIC boot"
+  mic="$1"; shift
+  while [ -n "$mic" ]; do
+    echo -n "[PROLOG]       resetting $mic ."
+    /usr/sbin/micctrl --reset $mic &> /dev/null
+    status_msg="$(mic_status $mic)"
+    while [ "$status_msg" = "resetting" ]; do
+      sleep 2
+      echo -n '.'
+      status_msg="$(mic_status $mic)"
+    done
+    if [ "$status_msg" = "ready" ]; then
+      echo " ok"
+    else
+      echo " failed"
+      echo "[PROLOG]     $(/usr/sbin/micctrl --status $mic)"
+    fi
+    mic="$1"; shift
+  done
+  exit 1
+}
+
+#
+##
+#
+
+mic_finish_boot ()
+{
+  local status_msg
+  local cmd
+  local gid gids gidNumber groupList workgroups
+  local mic="$1"
+  local mic_host="$(hostname -s)-${mic}"
+
+  status_msg="$(mic_status $mic)"
+  while [ "$status_msg" = "booting" ]; do
+    sleep 2
+    echo -n '.'
+    status_msg="$(mic_status $mic)"
+  done
+  if [ "$status_msg" = "online" ]; then
+    echo " ok"
+    MIC_BOOTED+=("$mic")
+  else
+    echo " failed"
+    echo "[PROLOG]       $(/usr/sbin/micctrl --status $mic)"
+    mic_cleanup "${MIC_BOOTED[@]}"
+  fi
+
+  #
+  # With the MIC booted okay, setup the user environment.  Start by
+  # adding all non-system groups to which the user is a member:
+  #
+  gids="$(groups ${MIC_USER} | sed 's/^'${MIC_USER}' : //')"
+  groupList=""
+  workgroups=()
+  echo -n "[PROLOG]       adding groups for '$MIC_USER' to $mic ."
+  ssh $mic_host /usr/sbin/groupadd --gid 1000 user &> /dev/null
+  for gid in $gids; do
+    gidNumber="$(grep ^${gid}: /etc/group | awk -F: '{print $3;exit;}')"
+    if [ -n "$gidNumber" -a "$gidNumber" -ge 100 ]; then
+      status_msg="$(ssh $mic_host /usr/sbin/groupadd --gid $gidNumber $gid 2>&1)"
+      if [ $? -ne 0 ]; then
+        if [[ ! $status_msg =~ already\ exists$ ]]; then
+          echo " failed"
+          echo -n "[PROLOG]         $status_msg"
+          mic_cleanup "${MIC_BOOTED[@]}"
+        fi
+      fi
+      if [ -z "$groupList" ]; then
+        groupList=$gid
+      else
+        groupList+=",$gid"
+      fi
+      if [ $gidNumber -ge 1000 ]; then
+        status_msg="$(ssh $mic_host mkdir -p /home/work/$gid 2>&1)"
+        if [ $? -ne 0 ]; then
+          echo " failed"
+          echo $status_msg
+        fi
+        workgroups+=("$gid")
+      fi
+      echo -n '.'
+    fi
+  done
+  echo " ok"
+
+  #
+  # Add the user's account:
+  #
+  cmd="$(grep ^${MIC_USER}: /etc/passwd | awk -F: '{printf("/usr/sbin/useradd --uid %d --gid %d --home-dir %s --comment \"%s\" --groups '$groupList' --no-create-home --no-user-group %s\n", $3, $4, $6, $5, $1);}')"
+  echo -n "[PROLOG]       adding user '$MIC_USER' to $mic ."
+  status_msg="$(ssh $mic_host $cmd 2>&1)"
+  if [ $? -ne 0 ]; then
+    if [[ ! $status_msg =~ already\ exists$ ]]; then
+      echo " failed"
+      echo -n "[PROLOG]         $status_msg"
+      mic_cleanup "${MIC_BOOTED[@]}"
+    fi
+  fi
+  echo " ok"
+
+  #
+  # Mount NFS directories.  First, the user's home directory:
+  #
+  cmd="$(grep ^${MIC_USER}: /etc/passwd | awk -F: '{printf("mkdir -p %s ; mount -t nfs -o nosuid,nfsvers=3 storage-nfs1:/export%s %s\n", $6, $6, $6);}')"
+  echo -n "[PROLOG]       mounting user '$MIC_USER' home directory on $mic ."
+  status_msg="$(ssh $mic_host $cmd 2>&1)"
+  if [ $? -ne 0 ]; then
+    if [[ ! $status_msg =~ Device\ or\ resource\ busy ]]; then
+      echo " failed"
+      echo -n "[PROLOG]         $status_msg"
+      mic_cleanup "${MIC_BOOTED[@]}"
+    fi
+  fi
+  echo " ok"
+
+  #
+  # Now any workgroup directories:
+  #
+  echo -n "[PROLOG]       mounting workgroup directories on $mic ."
+  for gid in "${workgroups[@]}"; do
+    status_msg="$(ssh $mic_host mount -t nfs -o nosuid,nfsvers=3 storage-nfs1:/export/work/$gid /home/work/$gid 2>&1)"
+    if [ $? -ne 0 ]; then
+      if [[ ! $status_msg =~ Device\ or\ resource\ busy ]]; then
+        echo " failed"
+        echo -n "[PROLOG]         $status_msg"
+        mic_cleanup "${MIC_BOOTED[@]}"
+      fi
+    fi
+    echo -n '.'
+  done
+  echo " ok"
+  echo "[PROLOG]     $mic is ready"
+}
+
+#
+##
+#
+
+mic_finish_reset ()
+{
+  local status_msg
+  local mic="$1"
+
+  status_msg="$(mic_status $mic)"
+  while [ "$status_msg" = "resetting" ]; do
+    sleep 2
+    echo -n '.'
+    status_msg="$(mic_status $mic)"
+  done
+  if [ "$status_msg" = "ready" ]; then
+    echo " ok"
+  else
+    echo " failed"
+    echo "[PROLOG]     $(/usr/sbin/micctrl --status $mic)"
+    mic_cleanup "${MIC_BOOTED[@]}"
+  fi
+}
+
+#
+##
+#
+
+#
+# First argument is the uid of the user for whom we're booting the MIC(s)
+#
+MIC_USER="$1"
+if [ -z "$MIC_USER" ]; then
+  echo "[PROLOG]     no user provided for MIC boot, skipping"
+  exit 1
+fi
+shift
+
+MIC_BOOTED=()
+while [ -n "$1" ]; do
+  MIC="$1"; shift
+
+  TRIES=0
+  while [ $TRIES -lt 2 ]; do
+    MIC_STATUS="$(mic_status $MIC)"
+    case "$MIC_STATUS" in
+
+      ready)
+        echo -n "[PROLOG]     booting $MIC ."
+        /usr/sbin/micctrl --boot $MIC &> /dev/null
+        if [ $? -ne 0 ]; then
+          echo "failed"
+        else
+          mic_finish_boot "$MIC"
+          break
+        fi
+        ;;
+
+      booting)
+        echo -n "[PROLOG]     $MIC is booting ."
+        mic_finish_boot "$MIC"
+        break
+        ;;
+
+      online)
+        echo -n "[PROLOG]     $MIC is booting ."
+        mic_finish_boot "$MIC"
+        break
+        break
+        ;;
+
+      *)
+        echo -n "[PROLOG]     resetting $MIC ."
+        /usr/sbin/micctrl --reset --force $MIC &> /dev/null
+        if [ $? -ne 0 ]; then
+          echo " failed"
+          mic_cleanup "${MIC_BOOTED[@]}"
+        else
+          mic_finish_reset "$MIC"
+        fi
+        ;;
+
+    esac
+    sleep 2
+    TRIES=$((TRIES+1))
+  done
+done
+
+exit 0

@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# geco_prolog
+# UGE Prolog script
+#
+# This script is executed by the sge_shepherd after job setup has completed
+# but before the job script itself is executed.
+#
+
+if [ -r "__GECO_ETCDIR__/geco-defaults.sh" ]; then
+  . "__GECO_ETCDIR__/geco-defaults.sh"
+fi
+
+echo "[PROLOG] Entering Grid Engine prolog script"
+if [ -z "$JOB_ID" ]; then
+  PINFO=$(ps -o pid,ppid,cmd --no-headers -p $PPID)
+  while [ -n "$PINFO" ]; do
+    CMD=$(echo $PINFO | sed -r 's/^\s*[0-9]+\s+[0-9]+\s+(.*)$/\1/')
+    if [ -n "$CMD" ]; then
+      IS_SHEPHERD=$(echo $CMD | sed -r 's/^sge_shepherd-[0-9]+.*$//')
+      if [ -z "$IS_SHEPHERD" ]; then
+        JOB_ID=$(echo $CMD | sed -r 's/^sge_shepherd-([0-9]+)\s+.*$/\1/')
+        break
+      else
+        PPPID=$(echo $PINFO | sed -r 's/^\s*[0-9]+\s+([0-9]+)\s+(.*)$/\1/')
+        if [ -n "$PPPID" ]; then
+          PINFO=$(ps -o pid,ppid,cmd --no-headers -p $PPPID)
+        else
+          echo "ERROR:  No parent pid found: $PINFO"
+          exit 100
+        fi
+      fi
+    fi
+  done
+  if [ -z "$JOB_ID" ]; then
+    echo "[PROLOG] No JOB_ID in environment, cannot proceed"
+    exit 100
+  else
+    export JOB_ID
+  fi
+fi
+if [ -z "$SGE_TASK_ID" ]; then
+  echo "[PROLOG] No SGE_TASK_ID in environment, cannot proceed"
+  exit 100
+else
+  if [ "$SGE_TASK_ID" = "undefined" ]; then
+    SGE_TASK_ID=1
+  fi
+fi
+
+PROLOG_SCRIPT="$(${GECO_RSRCINFO} -j ${JOB_ID} --mode=prolog ${SGE_TASK_ID})"
+if [ $? -eq 0 ]; then
+  eval "$PROLOG_SCRIPT"
+  unset PROLOG_SCRIPT
+else
+  echo "[PROLOG] Error in resource allocation summary, cannot proceed:"
+  echo "$PROLOG_SCRIPT"
+  exit 100
+fi
+
+#
+# At this point, the GECO_RSRCINFO script will have setup:
+#
+#  SGE_PROLOG_HOSTS       array of participating host names
+#  SGE_PROLOG_NSLOTS      array of core counts on each participating host
+#  SGE_PROLOG_MEM         array of cgroup memory limit for each participating host
+#  SGE_PROLOG_VMEM        array of cgroup virtual memory limit for each participating host
+#  SGE_PROLOG_GPU         array of GPU assignments for each participating host
+#  SGE_PROLOG_PHI         array of Intel Phi assignments for each participating host
+#
+# Now all we need to do is loop over the SGE_PROLOG_HOSTS and perform any GPU/Phi initialization for each.
+#
+SGE_PROLOG_THIS_HOST="$(hostname -s)"
+SGE_PROLOG_INDEX=0
+echo "[PROLOG]"
+echo "[PROLOG] host initialization commencing:"
+while [ $SGE_PROLOG_INDEX -lt ${#SGE_PROLOG_HOSTS[@]} ]; do
+  SGE_PROLOG_HOST=${SGE_PROLOG_HOSTS[SGE_PROLOG_INDEX]}
+  if [ "$SGE_PROLOG_HOST" = "$SGE_PROLOG_THIS_HOST" ]; then
+    # Boot any MICs that are allocated to the job:
+    if [[ -n ${SGE_PROLOG_PHI[SGE_PROLOG_INDEX]} ]]; then
+      $GECO_BOOTMIC "$SGE_O_LOGNAME" ${SGE_PROLOG_PHI[SGE_PROLOG_INDEX]}
+      if [ $? -ne 0 ]; then
+        exit 100
+      fi
+    fi
+  else
+    # Boot any MICs that are allocated to the job:
+    if [[ -n ${SGE_PROLOG_PHI[SGE_PROLOG_INDEX]} ]]; then
+      ssh $SSH_OPTIONS $SGE_PROLOG_HOST $GECO_BOOTMIC "$SGE_O_LOGNAME" ${SGE_PROLOG_PHI[SGE_PROLOG_INDEX]}
+      if [ $? -ne 0 ]; then
+        exit 100
+      fi
+    fi
+  fi
+  SGE_PROLOG_INDEX=$((SGE_PROLOG_INDEX+1))
+done
+echo "[PROLOG] done"
+echo
+
+exit 0

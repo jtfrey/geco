@@ -1,0 +1,52 @@
+#!/bin/bash
+
+mic_status ()
+{
+  local status_msg
+
+  status_msg="$(/usr/sbin/micctrl --status $1)"
+  if [ $? -eq 0 ]; then
+    status_msg="$(echo $status_msg | sed -e 's/^'$1': //' -e 's/ *(.*$//')"
+    echo $status_msg
+    return 0
+  fi
+  return 1
+}
+
+#
+##
+#
+
+mic_finish_reset ()
+{
+  local status_msg
+  local mic="$1"
+
+  status_msg="$(mic_status $mic)"
+  while [ "$status_msg" = "resetting" ]; do
+    sleep 2
+    echo -n '.'
+    status_msg="$(mic_status $mic)"
+  done
+  if [ "$status_msg" = "ready" ]; then
+    echo " ok"
+  else
+    echo " failed"
+    echo "[EPILOG]     $(/usr/sbin/micctrl --status $mic)"
+  fi
+}
+
+#
+##
+#
+
+while [ -n "$1" ]; do
+  MIC="$1"; shift
+  echo -n "[EPILOG]     resetting $MIC ."
+  /usr/sbin/micctrl --reset --force $MIC &> /dev/null
+  if [ $? -ne 0 ]; then
+    echo " failed"
+  else
+    mic_finish_reset "$MIC"
+  fi
+done

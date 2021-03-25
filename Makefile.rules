@@ -1,0 +1,43 @@
+
+$(TARGET): $(OBJECTS)
+	$(CC) -o $@ $(CFLAGS) $^ $(LDFLAGS) $(LIBS)
+
+$(TARGET).a: $(OBJECTS)
+	$(AR) -rcsv $@ $?
+
+$(TARGET).so: $(OBJECTS)
+	$(CC) -o $@ -shared -Wl,-soname,$(TARGET).so $(CFLAGS) $^ $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f $(TARGET) $(TARGET).a $(TARGET).so $(OBJECTS)
+
+install_$(TARGET): $(ETCDIR) $(BINDIR) $(BINDIR)/$(TARGET)
+install_$(TARGET).a: $(ETCDIR) $(LIBDIR) $(LIBDIR)/$(TARGET).a install_headers_$(TARGET)
+install_$(TARGET).so: $(ETCDIR) $(LIBDIR) $(LIBDIR)/$(TARGET).so install_headers_$(TARGET)
+
+install_headers_$(TARGET): $(ETCDIR) $(INCDIR) $(addprefix $(INCDIR)/,$(HEADERS))
+
+$(BINDIR)/$(TARGET): $(OBJECTS)
+	$(CC) -o $@ $(CFLAGS) $^ $(install_LDFLAGS) $(install_LIBS)
+
+$(LIBDIR)/$(TARGET).a: $(TARGET).a
+	cp -f $^ $@
+
+$(LIBDIR)/$(TARGET).so: $(OBJECTS)
+	$(CC) -o $@ -shared -Wl,-soname,$(TARGET).so $(CFLAGS) $^ $(install_LDFLAGS) $(install_LIBS)
+
+$(INCDIR)/%.h: %.h
+	cp $< $@
+
+$(BINDIR):
+	mkdir -p $(BINDIR)
+
+$(ETCDIR):
+	mkdir -p $(ETCDIR)
+
+$(LIBDIR):
+	mkdir -p $(LIBDIR)
+
+$(INCDIR):
+	mkdir -p $(INCDIR)
+

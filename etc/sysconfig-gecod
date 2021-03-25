@@ -1,0 +1,33 @@
+#
+# gecod local configuration overrides
+#
+
+# The base installation path for GECO:
+#GECO_PREFIX=/install/path
+
+# Specific path for the gecod binary:
+#GECOD=/path/to/gecod
+
+# Specific path to the GECO LD_PRELOAD library that should be copied to the compute node:
+#GECO_LDPRELOAD_LIB=/path/to/libGECOLdPreload.so
+
+# Location of the geco pidfile:
+#GECOD_PIDFILE=/var/run/gecod.pid
+
+# Location of the geco service lock file:
+#GECOD_LOCKFILE=/var/lock/subsys/gecod
+
+# Where should we log any output from gecod:
+#GECOD_LOGFILE=/path/to/gecod.log
+
+# Options to pass on the gecod command line:
+#GECOD_OPTIONS=("-vv" "--quarantine-socket=path:/var/run/gecod.s" "--no-qstat")
+
+# How many seconds should we wait between checks for localdisk's being online?
+#GECO_LOCALDISK_CHECK_INTERVAL=30
+
+# How many checks will be allow for localdisk to come online?
+# Multiply by GECO_LOCALDISK_CHECK_INTERVAL for the time limit (for
+# the defaults, 30 * 20 = 600 s = 10 min)
+#GECO_LOCALDISK_CHECK_MAX=20
+

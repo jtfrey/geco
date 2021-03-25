@@ -1,0 +1,145 @@
+#!/bin/sh
+#
+# chkconfig: 2345 98 02
+# description: gecod startup script
+#
+
+# pull in sysconfig settings
+[ -f /etc/sysconfig/gecod ] && . /etc/sysconfig/gecod
+
+# default values for everything that wasn't specified by the
+# sysconfig file (if present):
+GECO_PREFIX="${GECO_PREFIX:-/opt/shared/univa/GECO}"
+GECOD="${GECOD:-${GECO_PREFIX}/sbin/gecod}"
+GECO_LDPRELOAD_LIB="${GECO_LDPRELOAD_LIB:-${GECO_PREFIX}/lib64/libGECOLdPreload.so}"
+GECOD_PIDFILE="${GECOD_PIDFILE:-/var/run/gecod.pid}"
+GECOD_LOCKFILE="${GECOD_LOCKFILE:-/var/lock/subsys/gecod}"
+GECOD_LOGFILE="${GECOD_LOGFILE:-/tmp/gecod.log}"
+if [ -z "${GECOD_OPTIONS[*]}" ]; then
+  GECOD_OPTIONS=()
+fi
+GECO_LOCALDISK_CHECK_INTERVAL=30
+GECO_LOCALDISK_CHECK_MAX=20
+
+. /etc/init.d/functions
+
+wait_for_localdisk() {
+  #
+  # We don't want to start sge_execd until local disk has
+  # been mounted.
+  #
+  local STRING=$"Waiting for local disk to mount..."
+  local check_num=0
+  local has_mount=$(grep /tmp /proc/mounts|wc -l)
+  while [ $has_mount -eq 0 -a $check_num -lt $GECO_LOCALDISK_CHECK_MAX ]; do
+    if [ $check_num -eq 0 ]; then
+      echo $STRING
+    fi
+    sleep $GECO_LOCALDISK_CHECK_INTERVAL
+    check_num=$((check_num+1))
+    has_mount=$(grep /tmp /proc/mounts|wc -l)
+  done
+  if [ $has_mount -eq 0 ]; then
+    failure "$STRING"
+    RETVAL=1 
+  else
+    if [ $check_num -gt 0 ]; then
+      success "$STRING"
+    fi
+  fi
+}
+
+geco_install_ldpreload() {
+  #
+  # Prepare the GECO environment:
+  #
+  if [ ! -f $GECOD ]; then 
+    echo "Unable to start Grid Engine services, $GECOD not present."
+    RETVAL=1
+  else
+    local STRING=$"Installing GECO LD_PRELOAD library"
+    echo $STRING
+    cp "$GECO_LDPRELOAD_LIB" /lib64 &> /dev/null
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ]; then
+      chmod u+s /lib64/libGECOLdPreload.so &> /dev/null
+      RETVAL=$?
+      if [ $RETVAL -eq 0 ]; then
+        success "$STRING"
+      else
+        failure "$STRING"
+        echo "  Failed to chmod setuid bit on /lib64/libGECOLdPreload.so"
+      fi
+    else
+      failure "$STRING"
+      echo "  Failed to copy library to /lib64"
+    fi
+  fi
+}
+
+RETVAL=0
+
+case "$1" in
+  start)
+    wait_for_localdisk
+    if [ $RETVAL -eq 0 ]; then
+      geco_install_ldpreload
+      if [ $RETVAL -eq 0 ]; then
+        STRING=$"Starting Grid Engine Cgroup Orchestrator daemon: "
+        echo $STRING
+        "$GECOD" --daemon --pidfile="$GECOD_PIDFILE" "${GECOD_OPTIONS[@]}" 2>> "$GECOD_LOGFILE"
+        RETVAL=$?
+        if [ $RETVAL -eq 0 ]; then
+          touch "$GECOD_LOCKFILE"
+          success "$STRING"
+          # Now go ahead and start the SGE execd:
+          /etc/init.d/sgeexecd.farber start
+          RETVAL=$?
+        else
+          failure "$STRING"
+        fi
+      fi
+    fi
+    ;;
+
+  stop)
+    # Stop SGE execd first:
+    /etc/init.d/sgeexecd.farber stop
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ]; then
+      if [ -f "$GECOD_PIDFILE" ]; then
+        GECOD_PID=$(cat "$GECOD_PIDFILE")
+        STRING=$"Stopping Grid Engine Cgroup Orchestrator daemon: "
+        echo $STRING
+        kill "$GECOD_PID"
+        RETVAL=$?
+        if [ $RETVAL -eq 0 ]; then
+          rm -f "$GECOD_LOCKFILE"
+          rm -r "$GECOD_PIDFILE"
+          success "$STRING"
+        else
+          failure "$STRING"
+        fi
+      fi
+    fi
+    ;;
+
+  restart|reload)
+    $0 stop
+    $0 start
+    RETVAL=$?
+    ;;
+
+  status)
+   	status gecod
+   	RETVAL=$?
+    ;;
+
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+
+esac
+
+exit $RETVAL
+

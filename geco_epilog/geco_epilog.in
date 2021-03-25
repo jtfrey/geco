@@ -1,0 +1,126 @@
+#!/bin/bash
+#
+# geco_epilog
+# UGE Epilog script
+#
+# This script is executed by the sge_shepherd after job script execution.
+#
+
+if [ -r "__GECO_ETCDIR__/geco-defaults.sh" ]; then
+  . "__GECO_ETCDIR__/geco-defaults.sh"
+fi
+
+echo
+echo "[EPILOG] Entering Grid Engine epilog script"
+if [ -z "$JOB_ID" ]; then
+  PINFO=$(ps -o pid,ppid,cmd --no-headers -p $PPID)
+  while [ -n "$PINFO" ]; do
+    CMD=$(echo $PINFO | sed -r 's/^\s*[0-9]+\s+[0-9]+\s+(.*)$/\1/')
+    if [ -n "$CMD" ]; then
+      IS_SHEPHERD=$(echo $CMD | sed -r 's/^sge_shepherd-[0-9]+.*$//')
+      if [ -z "$IS_SHEPHERD" ]; then
+        JOB_ID=$(echo $CMD | sed -r 's/^sge_shepherd-([0-9]+)\s+.*$/\1/')
+        break
+      else
+        PPPID=$(echo $PINFO | sed -r 's/^\s*[0-9]+\s+([0-9]+)\s+(.*)$/\1/')
+        if [ -n "$PPPID" ]; then
+          PINFO=$(ps -o pid,ppid,cmd --no-headers -p $PPPID)
+        else
+          echo "ERROR:  No parent pid found: $PINFO"
+          exit 100
+        fi
+      fi
+    fi
+  done
+  if [ -z "$JOB_ID" ]; then
+    echo "[EPILOG] No JOB_ID in environment, cannot proceed"
+    exit 100
+  else
+    export JOB_ID
+  fi
+fi
+if [ -z "$SGE_TASK_ID" ]; then
+  echo "[EPILOG] No SGE_TASK_ID in environment, cannot proceed"
+  exit 100
+else
+  if [ "$SGE_TASK_ID" = "undefined" ]; then
+    SGE_TASK_ID=1
+  fi
+fi
+
+#
+# Move this script's PID out of the job's cgroup containers
+# so that the task list kill-off won't touch us:
+#
+for CGROUP_DIR in ${CGROUP_PREFIX}/*/GECO/${JOB_ID}.${SGE_TASK_ID} ; do
+  if [ -d "$CGROUP_DIR" ]; then
+    echo $$ > "${CGROUP_DIR}/../../tasks"
+  fi
+done
+
+EPILOG_SCRIPT="$(${GECO_RSRCINFO} -j ${JOB_ID} --mode=epilog ${SGE_TASK_ID})"
+if [ $? -eq 0 ]; then
+  eval "$EPILOG_SCRIPT"
+  unset EPILOG_SCRIPT
+else
+  echo "[EPILOG] Error in resource allocation summary, cannot proceed:"
+  echo "$EPILOG_SCRIPT"
+  exit 100
+fi
+
+#
+# At this point, the GECO_RSRCINFO script will have setup:
+#
+#  SGE_EPILOG_HOSTS       array of participating host names
+#  SGE_EPILOG_NSLOTS      array of core counts on each participating host
+#  SGE_EPILOG_MEM         array of cgroup memory limit for each participating host
+#  SGE_EPILOG_VMEM        array of cgroup virtual memory limit for each participating host
+#  SGE_EPILOG_GPU         array of GPU assignments for each participating host
+#  SGE_EPILOG_PHI         array of Intel Phi assignments for each participating host
+#
+# Now all we need to do is loop over the SGE_EPILOG_HOSTS and perform GPU/Phi teardown and cgroup
+# cleanup for each.
+#
+SGE_EPILOG_THIS_HOST="$(hostname -s)"
+SGE_EPILOG_INDEX=0
+while [ $SGE_EPILOG_INDEX -lt ${#SGE_EPILOG_HOSTS[@]} ]; do
+  SGE_EPILOG_HOST=${SGE_EPILOG_HOSTS[SGE_EPILOG_INDEX]}
+  #
+  # Make sure we scrub the cgroups:
+  #
+  if [ "$SGE_EPILOG_HOST" = "$SGE_EPILOG_THIS_HOST" ]; then
+    echo    "[EPILOG]   ${SGE_EPILOG_HOST} cgroup cleanup (master)"
+    $GECO_CGROUPCLEANUP "${JOB_ID}.${SGE_TASK_ID}" 2> /dev/null
+  else
+    echo    "[EPILOG]   ${SGE_EPILOG_HOST} cgroup cleanup (slave)"
+    ssh $SSH_OPTIONS $SGE_EPILOG_HOST $GECO_CGROUPCLEANUP "${JOB_ID}.${SGE_TASK_ID}"  2> /dev/null
+  fi
+  #
+  # Reset any Phi used by this job:
+  #
+  if [[ -n ${SGE_EPILOG_PHI[SGE_EPILOG_INDEX]} ]]; then
+    # Reset any MICs that are allocated to the job:
+    SGE_EPILOG_HOST=${SGE_EPILOG_HOSTS[SGE_EPILOG_INDEX]}
+    echo    "[EPILOG]   ${SGE_EPILOG_HOST} resetting ${SGE_EPILOG_PHI[SGE_EPILOG_INDEX]}"
+    if [ "$SGE_EPILOG_HOST" = "$SGE_EPILOG_THIS_HOST" ]; then
+      $GECO_RESETMIC ${SGE_EPILOG_PHI[SGE_EPILOG_INDEX]}
+    else
+      ssh $SSH_OPTIONS $SGE_EPILOG_HOST $GECO_RESETMIC ${SGE_EPILOG_PHI[SGE_EPILOG_INDEX]}
+    fi
+  fi
+  SGE_EPILOG_INDEX=$((SGE_EPILOG_INDEX+1))
+done
+
+#
+# Scrub the cached resource info:
+#
+GECO_RSRC_CACHE="${GECO_STATEDIR}/resources/${JOB_ID}.${SGE_TASK_ID}"
+if [ -f "$GECO_RSRC_CACHE" ]; then
+  echo "[EPILOG] Removing $GECO_RSRC_CACHE"
+  rm -f "$GECO_RSRC_CACHE" >& /dev/null
+fi
+
+echo "[EPILOG] done."
+
+exit 0
+

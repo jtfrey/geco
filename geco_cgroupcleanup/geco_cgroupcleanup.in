@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+
+if [ -r "__GECO_ETCDIR__/geco-defaults.sh" ]; then
+  . "__GECO_ETCDIR__/geco-defaults.sh"
+fi
+
+IGNORE_PID=1
+if [ "$1" = "--ignore-pid" ]; then
+  shift
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    IGNORE_PID="$1"
+    shift
+  else
+    echo "ERROR:  invalid pid: $1"
+    exit 1
+  fi
+fi
+
+if [ -z "$1" ]; then
+  echo "ERROR:  no cgroup sub-directory provided"
+  exit 1
+fi
+SUBDIR="$1"
+
+# Remove the sub-directories if they exist, killing any processes that
+# may be lingering:
+for CGROUP_DIR in ${CGROUP_PREFIX}/*/GECO/${SUBDIR} ; do
+  if [ -d "$CGROUP_DIR" ]; then
+    DO_RMDIR=1
+    for pid in $(cat ${CGROUP_DIR}/tasks ); do
+      if [ $pid -ne $$ -a $pid -ne $IGNORE_PID ]; then
+        kill -9 $pid
+      else
+        DO_RMDIR=0
+      fi
+    done
+    if [ $DO_RMDIR -ne 0 ]; then
+      rmdir "$CGROUP_DIR"
+    fi
+  fi
+done

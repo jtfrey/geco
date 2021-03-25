@@ -1,0 +1,19 @@
+#
+# Default values used in many of the GECO shell scripts
+#
+
+CGROUP_PREFIX="__CGROUP_PREFIX__"
+
+GECO_STATEDIR="__GECO_STATEDIR__"
+
+GECO_BINDIR="__GECO_BINDIR__"
+GECO_ETCDIR="__GECO_ETCDIR__"
+GECO_SBINDIR="__GECO_SBINDIR__"
+
+GECO_RSRCINFO="${GECO_BINDIR}/geco-rsrcinfo"
+GECO_BOOTMIC="${GECO_SBINDIR}/geco_bootmic"
+GECO_RESETMIC="${GECO_SBINDIR}/geco_resetmic"
+GECO_CGROUPCLEANUP="${GECO_SBINDIR}/geco_cgroupcleanup"
+
+SSH_OPTIONS="-4ankx -enone -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -oConnectTimeout=300 -oConnectionAttempts=5 -oBatchMode=yes"
+
